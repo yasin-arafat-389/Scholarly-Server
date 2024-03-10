@@ -5,6 +5,7 @@ require("dotenv").config();
 const app = express();
 const bodyParser = require("body-parser");
 const openai = require("openai");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 5001;
 
 // Parsers
@@ -20,29 +21,88 @@ app.use(bodyParser.json());
 
 const openaiClient = new openai.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.gef2z8f.mongodb.net/?retryWrites=true&w=majority`;
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
 async function run() {
-  // Define database collections here
+  const userIPsCollection = client.db("Scholarly").collection("userIPs");
   try {
     //
     //
 
-    app.post("/generate-response", async (req, res) => {
+    async function limitMiddleware(req, res, next) {
+      const ip = req.ip;
+      const now = new Date();
+
       try {
-        setTimeout(() => {
-          res.json({
-            response:
-              "Big data primarily refers to data sets that are too large or complex to be dealt with by traditional data-processing application software.",
+        const rateLimitData = await userIPsCollection.findOne({ ip });
+
+        if (!rateLimitData) {
+          await userIPsCollection.insertOne({
+            ip,
+            requestCount: 1,
+            lastRequestAt: now,
           });
-        }, 5000);
+        } else {
+          const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+          if (rateLimitData.lastRequestAt < windowStart) {
+            await userIPsCollection.updateOne(
+              { ip },
+              { $set: { requestCount: 0, lastRequestAt: now } }
+            );
+          }
+
+          if (rateLimitData.requestCount >= 3) {
+            const retryAfterSecs = Math.ceil(
+              (rateLimitData.lastRequestAt.getTime() - now.getTime()) / 1000
+            );
+            return res.status(429).json({
+              error: "Too Many Requests",
+              retryAfterSecs: retryAfterSecs,
+            });
+          }
+
+          await userIPsCollection.updateOne(
+            { ip },
+            { $inc: { requestCount: 1 }, $set: { lastRequestAt: now } }
+          );
+        }
+
+        next();
+      } catch (error) {
+        console.error("Rate limiter error:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+
+    app.post("/generate-response", limitMiddleware, async (req, res) => {
+      try {
+        // Get the user input from the request body
+        const userInput = req.body.input;
+
+        // Make a request to the OpenAI API to generate a response
+        const response = await openaiClient.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [{ role: "user", content: userInput }],
+          max_tokens: 100,
+        });
+
+        // Return the generated response to the client
+        res.json({ response: response.choices[0].message.content });
       } catch (error) {
         // Handle errors
         console.error("Error generating response:", error);
         res.status(500).json({ error: "Internal Server Error" });
       }
     });
-
-    //
-    //
   } finally {
   }
 }

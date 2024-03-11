@@ -4,9 +4,8 @@ const cookieParser = require("cookie-parser");
 require("dotenv").config();
 const app = express();
 const bodyParser = require("body-parser");
-const openai = require("openai");
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 5001;
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // Parsers
 app.use(
@@ -19,90 +18,38 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.json());
 
-const openaiClient = new openai.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.gef2z8f.mongodb.net/?retryWrites=true&w=majority`;
-
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 async function run() {
-  const userIPsCollection = client.db("Scholarly").collection("userIPs");
   try {
     //
     //
-
-    async function limitMiddleware(req, res, next) {
-      const ip = req.ip;
-      const now = new Date();
-
+    app.post("/generate-response", async (req, res) => {
       try {
-        const rateLimitData = await userIPsCollection.findOne({ ip });
-
-        if (!rateLimitData) {
-          await userIPsCollection.insertOne({
-            ip,
-            requestCount: 1,
-            lastRequestAt: now,
-          });
-        } else {
-          const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-          if (rateLimitData.lastRequestAt < windowStart) {
-            await userIPsCollection.updateOne(
-              { ip },
-              { $set: { requestCount: 0, lastRequestAt: now } }
-            );
-          }
-
-          if (rateLimitData.requestCount >= 3) {
-            const retryAfterSecs = Math.ceil(
-              (rateLimitData.lastRequestAt.getTime() - now.getTime()) / 1000
-            );
-            return res.status(429).json({
-              error: "Too Many Requests",
-              retryAfterSecs: retryAfterSecs,
-            });
-          }
-
-          await userIPsCollection.updateOne(
-            { ip },
-            { $inc: { requestCount: 1 }, $set: { lastRequestAt: now } }
-          );
-        }
-
-        next();
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const prompt = req.body.input;
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+        res.json({ response: text });
       } catch (error) {
-        console.error("Rate limiter error:", error);
-        res.status(500).json({ error: "Internal Server Error" });
-      }
-    }
-
-    app.post("/generate-response", limitMiddleware, async (req, res) => {
-      try {
-        // Get the user input from the request body
-        const userInput = req.body.input;
-
-        // Make a request to the OpenAI API to generate a response
-        const response = await openaiClient.chat.completions.create({
-          model: "gpt-3.5-turbo",
-          messages: [{ role: "user", content: userInput }],
-          max_tokens: 100,
-        });
-
-        // Return the generated response to the client
-        res.json({ response: response.choices[0].message.content });
-      } catch (error) {
-        // Handle errors
         console.error("Error generating response:", error);
         res.status(500).json({ error: "Internal Server Error" });
       }
     });
+
+    // Decoy response
+    // app.post("/generate-response", async (req, res) => {
+    //   try {
+    //     res.json({
+    //       response:
+    //         "Contrary to popular belief, Lorem Ipsum is not simply random text. It has roots in a piece of classical Latin literature from 45 BC, making it over 2000 years old. Richard McClintock, a Latin professor at Hampden-Sydney College in Virginia, looked up one of the more obscure Latin words, consectetur, from a Lorem Ipsum passage, and going through the cites of the word in classical literature, discovered the undoubtable source. Lorem Ipsum comes from sections 1.10.32 andContrary to popular belief, Lorem Ipsum is not simply random text. It has roots ",
+    //     });
+    //   } catch (error) {
+    //     console.error("Error generating response:", error);
+    //     res.status(500).json({ error: "Internal Server Error" });
+    //   }
+    // });
   } finally {
   }
 }
